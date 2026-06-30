@@ -23,7 +23,7 @@ from utils.converter import ImageConverter
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true"
+DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true")
 
 if not BOT_TOKEN:
     logging.error("❌ BOT_TOKEN is not set in environment variables")
