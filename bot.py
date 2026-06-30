@@ -4,6 +4,7 @@ import logging
 import asyncio
 from pathlib import Path
 from datetime import datetime
+from typing import Tuple, Optional
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -15,8 +16,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
-
-from utils.converter import ImageConverter
+from PIL import Image
 
 # ============ CONFIGURATION ============
 
@@ -26,7 +26,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true"
 
 if not BOT_TOKEN:
-    logging.error("❌ BOT_TOKEN is not set in environment variables")
+    print("❌ BOT_TOKEN is not set in environment variables")
     sys.exit(1)
 
 # ============ LOGGING ============
@@ -55,6 +55,89 @@ SUPPORTED_FORMATS = [
     "PNG", "JPG", "JPEG", "WEBP", 
     "BMP", "ICO", "GIF", "TIFF"
 ]
+
+# ============ IMAGE CONVERTER CLASS ============
+
+class ImageConverter:
+    """Handles image conversion operations"""
+    
+    def __init__(self, max_size_mb: int = 20):
+        self.max_size_mb = max_size_mb
+    
+    async def convert(
+        self,
+        input_path: Path,
+        output_path: Path,
+        target_format: str,
+        quality: int = 90,
+        resize: Optional[Tuple[int, int]] = None
+    ) -> Tuple[bool, str]:
+        """Convert an image to the specified format"""
+        try:
+            # Validate input file
+            if not input_path.exists():
+                return False, "Input file not found"
+            
+            # Check file size
+            file_size_mb = input_path.stat().st_size / (1024 * 1024)
+            if file_size_mb > self.max_size_mb:
+                return False, f"File too large ({file_size_mb:.1f}MB). Max: {self.max_size_mb}MB"
+            
+            # Open image
+            try:
+                img = Image.open(input_path)
+            except Exception as e:
+                return False, f"Failed to open image: {str(e)}"
+            
+            # Resize if requested
+            if resize:
+                img = img.resize(resize, Image.Resampling.LANCZOS)
+            
+            # Handle transparency for JPEG
+            if target_format.lower() in ["jpg", "jpeg"] and img.mode in ["RGBA", "P", "LA"]:
+                background = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode == "RGBA":
+                    mask = img.split()[3] if len(img.split()) > 3 else None
+                    background.paste(img, mask=mask)
+                else:
+                    background.paste(img)
+                img = background
+            
+            # Convert to RGB for BMP
+            if target_format.lower() == "bmp" and img.mode in ["RGBA", "LA"]:
+                img = img.convert("RGB")
+            
+            # Handle ICO format
+            if target_format.lower() == "ico":
+                if img.size[0] > 256 or img.size[1] > 256:
+                    img = img.resize((256, 256), Image.Resampling.LANCZOS)
+            
+            # Save with proper parameters
+            save_kwargs = {}
+            format_upper = target_format.upper()
+            
+            if target_format.lower() in ["jpg", "jpeg"]:
+                save_kwargs["quality"] = quality
+                save_kwargs["optimize"] = True
+            elif target_format.lower() == "webp":
+                save_kwargs["quality"] = quality
+                save_kwargs["method"] = 6
+            elif target_format.lower() == "png":
+                save_kwargs["optimize"] = True
+                save_kwargs["compress_level"] = 6
+            
+            # Save image
+            img.save(output_path, format=format_upper, **save_kwargs)
+            
+            # Validate output
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                return False, "Conversion failed - output file is empty"
+            
+            return True, f"Successfully converted to {format_upper}"
+            
+        except Exception as e:
+            logger.error(f"Conversion error: {e}")
+            return False, f"Conversion error: {str(e)}"
 
 # ============ STATES ============
 
@@ -223,10 +306,7 @@ async def format_selection_callback(callback: CallbackQuery, state: FSMContext):
     """Handle format selection"""
     await callback.answer()
     
-    # Extract selected format
     target_format = callback.data.split("_")[1]
-    
-    # Store format in state
     await state.update_data(target_format=target_format)
     await state.set_state(ConversionStates.waiting_for_image)
     
@@ -257,7 +337,6 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext):
 async def handle_image(message: Message, state: FSMContext):
     """Handle image upload for conversion"""
     try:
-        # Check if message has photo or document
         if not message.photo and not message.document:
             await message.answer(
                 "⚠️ **Please send an image file.**\n\n"
@@ -266,9 +345,8 @@ async def handle_image(message: Message, state: FSMContext):
             )
             return
         
-        # Get file from message
         if message.photo:
-            file = message.photo[-1]  # Get highest quality
+            file = message.photo[-1]
             file_extension = "jpg"
             file_name = f"image_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
         else:
@@ -284,26 +362,20 @@ async def handle_image(message: Message, state: FSMContext):
             file_extension = file.file_name.split('.')[-1].lower() if file.file_name else "jpg"
             file_name = file.file_name or f"image_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_extension}"
         
-        # Send processing message
         processing_msg = await message.answer("⏳ **Processing your image...**", parse_mode="Markdown")
         
-        # Download file
         file_path = TEMP_DIR / file_name
         await bot.download(file, file_path)
         
-        # Get target format from state
         state_data = await state.get_data()
         target_format = state_data.get("target_format", "PNG")
         
-        # Convert image
         converter = ImageConverter(max_size_mb=20)
         
-        # Detect source format
         source_format = file_extension.upper()
         if source_format == "JPG":
             source_format = "JPEG"
         
-        # Perform conversion
         output_format = target_format.lower()
         output_file = TEMP_DIR / f"converted_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{output_format}"
         
@@ -319,12 +391,10 @@ async def handle_image(message: Message, state: FSMContext):
             await state.clear()
             return
         
-        # Send converted image
         await processing_msg.delete()
         
-        # Calculate sizes
-        original_size = file_path.stat().st_size / 1024  # KB
-        new_size = output_file.stat().st_size / 1024  # KB
+        original_size = file_path.stat().st_size / 1024
+        new_size = output_file.stat().st_size / 1024
         
         caption = (
             f"✅ **Conversion Complete!**\n\n"
@@ -333,7 +403,6 @@ async def handle_image(message: Message, state: FSMContext):
             f"📥 **Download your image below:**"
         )
         
-        # Send as document (supports all formats)
         document = FSInputFile(output_file, filename=output_file.name)
         await message.answer_document(
             document,
@@ -341,7 +410,6 @@ async def handle_image(message: Message, state: FSMContext):
             parse_mode="Markdown"
         )
         
-        # Send conversion options
         await message.answer(
             "🎯 **Convert another image?**",
             reply_markup=InlineKeyboardMarkup(
@@ -353,14 +421,12 @@ async def handle_image(message: Message, state: FSMContext):
             parse_mode="Markdown"
         )
         
-        # Cleanup temp files
         try:
             file_path.unlink()
             output_file.unlink()
         except Exception as e:
             logger.warning(f"Failed to delete temp files: {e}")
         
-        # Clear state
         await state.clear()
         
     except Exception as e:
@@ -388,7 +454,6 @@ async def main():
     logger.info(f"📁 Temp Directory: {TEMP_DIR.absolute()}")
     
     try:
-        # Start polling
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"Bot crashed: {e}")
