@@ -1,1 +1,4 @@
-worker: python -u bot.py
+aiogram==3.10.0
+python-dotenv==1.0.1
+Pillow==11.0.0
+aiofiles==23.2.1
